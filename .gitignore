@@ -1,3 +1,5 @@
 lighttpd/
 testcase/
 cert/
+test
+test.*
