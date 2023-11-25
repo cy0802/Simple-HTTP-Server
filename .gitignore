@@ -3,3 +3,4 @@ testcase/
 cert/
 test
 test.*
+.vscode/
