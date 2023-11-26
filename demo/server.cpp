@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
-#define MAXLINE 100000000
+#define MAXLINE 100000
 #define errquit(m)	{ perror(m); exit(-1); }
 
 static int port_http = 80;
@@ -226,17 +226,17 @@ void sendFile(int c, HttpResponse response, std::string path){
 	response.generatePacket(buffer);
 	if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
 	std::cout << "header sent\n";
-	file.close();
 
-	file.open(path);
-	// file.seekg(0, std::ios::beg);
+	file.seekg(0, std::ios::beg);
 	bzero(&buffer, sizeof(buffer));
 	while(file.read(buffer, sizeof(buffer))){
 		std::cout << "sending file...\n";
-		if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+		if((n = write(c, buffer, sizeof(buffer))) < 0) errquit("write");
 		bzero(&buffer, sizeof(buffer));
 	}
-	if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+	std::cout << "go out of while loop\n";
+	std::cout << strlen(buffer) << "\n";
+	if((n = write(c, buffer, sizeof(buffer))) < 0) errquit("write");
 	file.close();
 }
 
