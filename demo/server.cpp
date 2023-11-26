@@ -4,21 +4,31 @@
 #include <filesystem>
 #include <algorithm>
 #include <set>
+#include <map>
+#include <fstream>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
-#define MAXLINE 3000
+#define MAXLINE 100000000
 #define errquit(m)	{ perror(m); exit(-1); }
 
 static int port_http = 80;
 static int port_https = 443;
 static const char *docroot = "/html";
+char buffer[MAXLINE];
 std::set<std::string> files;
-void proccessRequest(pid_t);
-void getAllFiles();
+std::map<std::string, std::string> mime = {
+	{"html", "text/html"},
+	{"htm", "text/html"},
+	{"txt", "text/plain;charset=utf-8"},
+	{"jpg", "image/jpeg"},
+	{"jpeg", "image/jpeg"},
+	{"png", "image/png"},
+	{"mp3", "audio/mpeg"}
+};
 
 class HttpResponse{
 public:
@@ -27,19 +37,19 @@ public:
 	std::string reason;
 	std::string contentType;
 	int contentLength;
-	std::string body;
 	HttpResponse(){
 		contentLength = statusCode = 0;
 	}
-	void generatePacket(char* buffer, bool error){
-		if(error) {
-			sprintf(buffer, "%s %d %s\r\nContent-Length: 0\r\n\r\n\r\n", version.c_str(), statusCode, reason.c_str());
-		} else {
-			sprintf(buffer, "%s %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s\r\n", 
-				version.c_str(), statusCode, reason.c_str(), contentType.c_str(), contentLength, body.c_str());
-		}
+	inline void generatePacket(char* buffer){
+		sprintf(buffer, "%s %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", 
+			version.c_str(), statusCode, reason.c_str(), contentType.c_str(), contentLength);
 	}
 };
+
+void proccessRequest(pid_t);
+void getAllFiles();
+std::string getContentType(std::string uri);
+void sendFile(int sockfd, HttpResponse response, std::string path);
 
 int main(int argc, char *argv[]) {
 	int s;
@@ -58,7 +68,6 @@ int main(int argc, char *argv[]) {
 	if(chdir(docroot) == -1) errquit("chdir");
 	// std::cout << getcwd(NULL, 1024) << '\n';
 	getAllFiles();
-
 	bzero(&sin, sizeof(sin));
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(80);
@@ -100,7 +109,7 @@ int main(int argc, char *argv[]) {
 }
 void proccessRequest(pid_t c){
 	int n;
-	char buffer[MAXLINE];
+	
 	if((n = read(c, buffer, MAXLINE)) < 0) errquit("read");
 	// char method[10], uri[30];
 	// bzero(&method, sizeof(method)); bzero(&uri, sizeof(uri));
@@ -111,32 +120,57 @@ void proccessRequest(pid_t c){
 	ss.clear();
 	ss << buffer;
 	ss >> method >> uri >> response.version;
+	
+	// get rid of not needed parameter
+	int pos = uri.find_first_of("?");
+	uri = uri.substr(0, pos);
+	
 	bzero(&buffer, sizeof(buffer));
+	if(uri == "/"){
+		uri = "/index.html";
+		auto it = std::find(files.begin(), files.end(), uri);
+		if(it == files.end()){
+			response.statusCode = 403;
+			response.reason = "Forbidden";
+			response.generatePacket(buffer);
+			if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+			return;
+		}
+	}
 	if(method != "GET"){
+		// method not supported
 		response.statusCode = 501;
 		response.reason = "Not Implemented";
-		response.generatePacket(buffer, 1);
+		response.generatePacket(buffer);
+		if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+		return;
 	} else if((it = std::find(files.begin(), files.end(), uri)) == files.end()){
 		if(uri.back() == '/'){
 			uri.pop_back();
 			if(std::find(files.begin(), files.end(), uri) != files.end()){
-				// 301
-				// redirect ?
+				// request a folder without slash
 				response.statusCode = 301;
 				response.reason = "Moved Permanently";
-				response.generatePacket(buffer, 1);
+				response.generatePacket(buffer);
+				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+				return;
 			} else {
+				// request not existed file
 				response.statusCode = 404;
 				response.reason = "Not Found";
-				response.generatePacket(buffer, 1);
+				response.generatePacket(buffer);
+				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+				return;
 			}
 		} else {
+			// request not existed file
 			response.statusCode = 404;
 			response.reason = "Not Found";
-			response.generatePacket(buffer, 1);
+			response.generatePacket(buffer);
+			if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+			return;
 		}
 	} else {
-		// check if this is a folder
 		struct stat s;
 		std::string path = "." + uri;
 		if(stat(path.c_str(), &s) == 0){
@@ -145,24 +179,65 @@ void proccessRequest(pid_t c){
 				response.statusCode = 404;
 				response.reason = "Not Found";
 				response.contentLength = 0;
-				response.generatePacket(buffer, 1);
+				response.generatePacket(buffer);
+				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+				return;
 			} else {
 				// regular response
 				response.statusCode = 200;
-				response.contentType = "text/plain;charset=utf-8";
+				response.contentType = getContentType(uri);
 				response.reason = "OK";
-				response.body = "It Works.";
-				response.contentLength = response.body.length() + 2;
-				response.generatePacket(buffer, 0);
+				sendFile(c, response, path);
+				return;
+				// response.body = readFile(path);
+				// response.contentLength = response.body.length();
+				// response.generatePacket(buffer);
+				// if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+
 			}
 		}
 		
 	}
-	
-	
-	std::cout << buffer;
-	if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+	// std::cout << buffer;
+	// if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
 	return;
+}
+
+std::string getContentType(std::string uri){
+	int pos = uri.find_first_of(".");
+	std::string ext = uri.substr(pos + 1, uri.length() - pos - 1);
+	// std::cout << ext << "\n";
+	auto it = mime.find(ext);
+	if(it == mime.end()) return "application/octet-stream";
+	else return mime[ext];
+}
+
+void sendFile(int c, HttpResponse response, std::string path){
+	std::ifstream file;
+	int n;
+	file.open(path, std::ios::binary); 
+	if(file.fail()) errquit("std::fstream open:");
+
+	// send header
+	std::streampos tmp = file.tellg();
+    file.seekg(0, std::ios::end);
+    response.contentLength = file.tellg() - tmp;
+	bzero(&buffer, sizeof(buffer));
+	response.generatePacket(buffer);
+	if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+	std::cout << "header sent\n";
+	file.close();
+
+	file.open(path);
+	// file.seekg(0, std::ios::beg);
+	bzero(&buffer, sizeof(buffer));
+	while(file.read(buffer, sizeof(buffer))){
+		std::cout << "sending file...\n";
+		if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+		bzero(&buffer, sizeof(buffer));
+	}
+	if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+	file.close();
 }
 
 void getAllFiles(){
