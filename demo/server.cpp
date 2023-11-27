@@ -6,14 +6,15 @@
 #include <set>
 #include <map>
 #include <fstream>
-#include <stdlib.h>
+#include <cstdlib>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
 #define MAXLINE 100000
-#define errquit(m)	{ perror(m); exit(-1); }
+#define errquit(m)	{ perror(m); exit(EXIT_FAILURE); }
+//#define errquitc(m, c)	{ perror(m); close(c); exit(-1); }
 
 static int port_http = 80;
 static int port_https = 443;
@@ -36,13 +37,15 @@ public:
 	int statusCode;
 	std::string reason;
 	std::string contentType;
+	std::string location; // optional
 	int contentLength;
 	HttpResponse(){
 		contentLength = statusCode = 0;
+		location.clear();
 	}
 	inline void generatePacket(char* buffer){
-		sprintf(buffer, "%s %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", 
-			version.c_str(), statusCode, reason.c_str(), contentType.c_str(), contentLength);
+		sprintf(buffer, "%s %d %s\r\nContent-Type: %s\r\nContent-Length: %d%s\r\n\r\n", 
+			version.c_str(), statusCode, reason.c_str(), contentType.c_str(), contentLength, location.c_str());
 	}
 };
 
@@ -60,7 +63,7 @@ int main(int argc, char *argv[]) {
 	if(argc > 3) { port_https = strtol(argv[3], NULL, 0); }
 
 	if((s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {errquit("socket");}
-	else {std::cout << "socket created\n";}
+	// else {std::cout << "socket created\n";}
 
 	int v = 1;
 	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v, sizeof(v));
@@ -73,9 +76,9 @@ int main(int argc, char *argv[]) {
 	sin.sin_port = htons(80);
 	sin.sin_addr.s_addr = htonl(INADDR_ANY); 
 	if(bind(s, (struct sockaddr*) &sin, sizeof(sin)) < 0) {errquit("bind");}
-	else {std::cout << "bind successfully\n";}
+	// else {std::cout << "bind successfully\n";}
 	if(listen(s, SOMAXCONN) < 0) {errquit("listen");}
-	else {std::cout << "listening\n";}
+	// else {std::cout << "listening\n";}
 
 	do {
 		int c;
@@ -87,19 +90,14 @@ int main(int argc, char *argv[]) {
 			// continue; 
 			exit(-1);
 		} else {
-			std::cout << "accept working\n";
+			// std::cout << "accept working\n";
 		}
 		pid_t child = fork();
 		
 		if(child == 0){
 			// handle request here	
 			close(s);
-			
 			proccessRequest(c);
-			// char buffer[MAXLINE];
-			// int n;
-			// if((n = read(c, buffer, MAXLINE)) < 0) errquit("read");
-			// std::cout << buffer << "\n";
 			close(c);
 			exit(EXIT_SUCCESS);
 		}
@@ -133,7 +131,7 @@ void proccessRequest(pid_t c){
 			response.statusCode = 403;
 			response.reason = "Forbidden";
 			response.generatePacket(buffer);
-			if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+			if((n = write(c, buffer, strlen(buffer))) < 0) errquit("wirte");
 			return;
 		}
 	}
@@ -142,24 +140,36 @@ void proccessRequest(pid_t c){
 		response.statusCode = 501;
 		response.reason = "Not Implemented";
 		response.generatePacket(buffer);
-		if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+		if((n = write(c, buffer, strlen(buffer))) < 0) errquit("wirte");
 		return;
 	} else if((it = std::find(files.begin(), files.end(), uri)) == files.end()){
 		if(uri.back() == '/'){
 			uri.pop_back();
 			if(std::find(files.begin(), files.end(), uri) != files.end()){
-				// request a folder without slash
-				response.statusCode = 301;
-				response.reason = "Moved Permanently";
-				response.generatePacket(buffer);
-				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
-				return;
+				// request a folder with slash
+				uri = uri + "/index.html";
+				// std::cout << uri << "\n";
+				if(std::find(files.begin(), files.end(), uri) == files.end()){
+					// no index.html under this folder
+					response.statusCode = 403;
+					response.reason = "Forbidden";
+					response.generatePacket(buffer);
+					if((n = write(c, buffer, strlen(buffer))) < 0) errquit("wirte");
+					return;
+				} else {
+					// regular response
+					response.statusCode = 200;
+					response.contentType = getContentType(uri);
+					response.reason = "OK";
+					sendFile(c, response, "." + uri);
+					return;
+				}
 			} else {
-				// request not existed file
+				// request not existed folder
 				response.statusCode = 404;
 				response.reason = "Not Found";
 				response.generatePacket(buffer);
-				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("wirte");
 				return;
 			}
 		} else {
@@ -167,7 +177,7 @@ void proccessRequest(pid_t c){
 			response.statusCode = 404;
 			response.reason = "Not Found";
 			response.generatePacket(buffer);
-			if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+			if((n = write(c, buffer, strlen(buffer))) < 0) errquit("wirte");
 			return;
 		}
 	} else {
@@ -176,11 +186,12 @@ void proccessRequest(pid_t c){
 		if(stat(path.c_str(), &s) == 0){
 			if(s.st_mode & S_IFDIR){
 				// a directory
-				response.statusCode = 404;
-				response.reason = "Not Found";
+				response.statusCode = 301;
+				response.reason = "Move Permanently";
+				response.location = "\r\nlocation: " + uri + "/";
 				response.contentLength = 0;
 				response.generatePacket(buffer);
-				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
+				if((n = write(c, buffer, strlen(buffer))) < 0) errquit("wirte");
 				return;
 			} else {
 				// regular response
@@ -224,19 +235,19 @@ void sendFile(int c, HttpResponse response, std::string path){
     response.contentLength = file.tellg() - tmp;
 	bzero(&buffer, sizeof(buffer));
 	response.generatePacket(buffer);
-	if((n = write(c, buffer, strlen(buffer))) < 0) errquit("write");
-	std::cout << "header sent\n";
+	if((n = write(c, buffer, strlen(buffer))) < 0) errquit("wirte");
+	// std::cout << "header sent\n";
 
 	file.seekg(0, std::ios::beg);
 	bzero(&buffer, sizeof(buffer));
 	while(file.read(buffer, sizeof(buffer))){
-		std::cout << "sending file...\n";
-		if((n = write(c, buffer, sizeof(buffer))) < 0) errquit("write");
+		// std::cout << "sending file...\n";
+		if((n = write(c, buffer, sizeof(buffer))) < 0) errquit("wirte");
 		bzero(&buffer, sizeof(buffer));
 	}
-	std::cout << "go out of while loop\n";
-	std::cout << strlen(buffer) << "\n";
-	if((n = write(c, buffer, sizeof(buffer))) < 0) errquit("write");
+	// std::cout << "go out of while loop\n";
+	// std::cout << strlen(buffer) << "\n";
+	if((n = write(c, buffer, sizeof(buffer))) < 0) errquit("wirte");
 	file.close();
 }
 
