@@ -53,6 +53,7 @@ void proccessRequest(pid_t);
 void getAllFiles();
 std::string getContentType(std::string uri);
 void sendFile(int sockfd, HttpResponse response, std::string path);
+std::string urlDecode(std::string uri);
 
 int main(int argc, char *argv[]) {
 	int s;
@@ -95,7 +96,8 @@ int main(int argc, char *argv[]) {
 		pid_t child = fork();
 		
 		if(child == 0){
-			// handle request here	
+			// child == 0 => is a child process
+			// otherwise => parent process
 			close(s);
 			proccessRequest(c);
 			close(c);
@@ -122,7 +124,7 @@ void proccessRequest(pid_t c){
 	// get rid of not needed parameter
 	int pos = uri.find_first_of("?");
 	uri = uri.substr(0, pos);
-	
+	uri = urlDecode(uri);
 	bzero(&buffer, sizeof(buffer));
 	if(uri == "/"){
 		uri = "/index.html";
@@ -257,4 +259,24 @@ void getAllFiles(){
 		files.insert(path);
 		// std::cout << path << '\n';
 	}
+}
+
+std::string urlDecode(std::string uri){
+	std::string result;
+	std::stringstream ss;
+	result.clear();
+	for(int i = 0; i < uri.length(); i++){
+		if(uri[i] == '%'){
+			int ascii;
+            std::string tmp;
+			ss.clear();
+			ss << std::hex << uri[i+1] << uri[i+2];
+			ss >> ascii;
+            result += (char)ascii;
+			i += 2;
+		} else {
+            result += uri[i];
+        }
+	}
+    return result;
 }
